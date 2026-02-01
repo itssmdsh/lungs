@@ -128,6 +128,11 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
     )
     with tf.GradientTape() as tape:
         last_conv_layer_output, preds = grad_model(img_array)
+        
+        # Convert preds to tensor if it's a list
+        if isinstance(preds, (list, tuple)):
+            preds = tf.convert_to_tensor(preds)
+        
         if pred_index is None:
             pred_index = tf.argmax(preds[0])
         
