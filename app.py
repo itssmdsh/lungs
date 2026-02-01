@@ -6,7 +6,6 @@ from PIL import Image
 import time
 import os
 import gdown
-import matplotlib.cm as cm
 
 # ==========================================
 # 1. PAGE CONFIGURATION & THEME
@@ -128,23 +127,19 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
     )
     with tf.GradientTape() as tape:
         last_conv_layer_output, preds = grad_model(img_array)
-        
-        # Convert preds to tensor if it's a list
-        if isinstance(preds, (list, tuple)):
-            preds = tf.convert_to_tensor(preds)
-        
         if pred_index is None:
             pred_index = tf.argmax(preds[0])
         
         # ---------------------------------------------------------
-        # 🛠️ ROBUST CONVERSION: Handle tensor to scalar safely
+        # 🛠️ ROBUST FIX: Use .item() to extract scalar safely
         # ---------------------------------------------------------
         if isinstance(pred_index, tf.Tensor):
-            pred_index = int(pred_index.numpy().flat[0])
-        elif isinstance(pred_index, np.ndarray):
-            pred_index = int(pred_index.flat[0])
-        else:
-            pred_index = int(pred_index)
+            pred_index = pred_index.numpy()
+        
+        if hasattr(pred_index, "item"):
+            pred_index = pred_index.item()
+            
+        pred_index = int(pred_index)
         # ---------------------------------------------------------
 
         class_channel = preds[:, pred_index]
@@ -161,22 +156,38 @@ def generate_gradcam_overlay(img_pil, model):
     img_array = np.array(img_pil.resize((224, 224))).astype('float32') / 255.0
     img_array = np.expand_dims(img_array, axis=0)
     
+    # 1. Find the last Conv layer
     last_conv_layer = None
     for layer in reversed(model.layers):
         if isinstance(layer, tf.keras.layers.Conv2D):
             last_conv_layer = layer.name
             break
 
+    # 2. Generate Heatmap (0 to 1)
     heatmap = make_gradcam_heatmap(img_array, model, last_conv_layer)
-    heatmap = np.uint8(255 * heatmap)
-    jet_heatmap = cm.get_cmap("jet")(np.arange(256))[:, :3]
-    jet_heatmap = jet_heatmap[heatmap]
-    jet_heatmap = cv2.resize(jet_heatmap, (224, 224))
-    jet_heatmap = tf.keras.preprocessing.image.array_to_img(jet_heatmap).resize(img_pil.size)
+    heatmap = cv2.resize(heatmap, (224, 224))
     
+    # 3. Convert to Jet Color Scheme (Red=Hot, Blue=Cold)
+    heatmap_uint8 = np.uint8(255 * heatmap)
+    heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+    
+    # ---------------------------------------------------------
+    # 🛠️ VISUAL FIX: Transparency Mask
+    # Remove the "Blue Screen" by making low values transparent
+    # ---------------------------------------------------------
+    alpha = np.float32(heatmap) 
+    alpha = np.expand_dims(alpha, axis=-1) # Shape (224, 224, 1)
+    
+    # Blend: Only apply heatmap where alpha is high
+    # Formula: Original * (1 - alpha) + Heatmap * alpha
     original_img = np.array(img_pil)
-    superimposed_img = np.array(jet_heatmap) * 0.4 + original_img * 0.6
-    return np.uint8(superimposed_img)
+    
+    # Mix 50% heatmap, 50% original
+    superimposed_img = original_img * (1 - alpha * 0.6) + heatmap_colored * (alpha * 0.6)
+    superimposed_img = np.clip(superimposed_img, 0, 255).astype(np.uint8)
+    
+    return superimposed_img
 
 def run_prediction(image, deep_scan_mode):
     start_time = time.time()
@@ -224,7 +235,7 @@ with st.sidebar:
     deep_mode = st.toggle("🧬 Deep Scan (High Accuracy)", value=False)
     explain_ai = st.toggle("🔥 Explain AI (Heatmap)", value=True)
     st.markdown("---")
-    st.caption("v1.0.8 | ResNet50V2 + DenseNet121")
+    st.caption("v1.1.2 | ResNet50V2 + DenseNet121")
 
 st.title("🫁 LungScan AI")
 st.markdown("### Advanced Chest X-Ray Diagnostic System")
