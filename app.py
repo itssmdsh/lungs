@@ -132,15 +132,14 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
             pred_index = tf.argmax(preds[0])
         
         # ---------------------------------------------------------
-        # 🛠️ ROBUST FIX: Use .item() to extract scalar safely
+        # 🛠️ ROBUST CONVERSION: Handle tensor to scalar safely
         # ---------------------------------------------------------
         if isinstance(pred_index, tf.Tensor):
-            pred_index = pred_index.numpy()
-        
-        if hasattr(pred_index, "item"):
-            pred_index = pred_index.item()
-            
-        pred_index = int(pred_index)
+            pred_index = int(pred_index.numpy())
+        elif isinstance(pred_index, np.ndarray):
+            pred_index = int(pred_index.flat[0])
+        else:
+            pred_index = int(pred_index)
         # ---------------------------------------------------------
 
         class_channel = preds[:, pred_index]
@@ -220,7 +219,7 @@ with st.sidebar:
     deep_mode = st.toggle("🧬 Deep Scan (High Accuracy)", value=False)
     explain_ai = st.toggle("🔥 Explain AI (Heatmap)", value=True)
     st.markdown("---")
-    st.caption("v1.0.9 | ResNet50V2 + DenseNet121")
+    st.caption("v1.0.8 | ResNet50V2 + DenseNet121")
 
 st.title("🫁 LungScan AI")
 st.markdown("### Advanced Chest X-Ray Diagnostic System")
