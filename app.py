@@ -135,7 +135,7 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
         # 🛠️ ROBUST CONVERSION: Handle tensor to scalar safely
         # ---------------------------------------------------------
         if isinstance(pred_index, tf.Tensor):
-            pred_index = int(pred_index.numpy())
+            pred_index = int(pred_index.numpy().flat[0])
         elif isinstance(pred_index, np.ndarray):
             pred_index = int(pred_index.flat[0])
         else:
