@@ -32,8 +32,16 @@ st.markdown("""
     }
     .pred-title { font-size: 30px; font-weight: 800; margin-bottom: 5px; }
     .confidence-score { font-size: 18px; color: #555; }
-    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
-    .stTabs [data-baseweb="tab"] { background-color: white; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    /* Badge for unavailable features */
+    .unavailable-badge {
+        background-color: #f8d7da;
+        color: #721c24;
+        padding: 10px;
+        border-radius: 5px;
+        border: 1px solid #f5c6cb;
+        font-size: 14px;
+        margin-bottom: 15px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -67,26 +75,35 @@ def smart_preprocess_image(image_file):
 def find_target_layer(model):
     """
     CRASH-PROOF SCANNER:
-    Iterates through layers and safely checks for 4D output (Conv layers).
-    Uses 'layer.output.shape' instead of 'output_shape' to fix Keras 3 bug.
+    Safely searches for the last 4D Convolutional layer.
     """
+    # Search in reverse order (from output to input)
     for layer in reversed(model.layers):
         try:
-            # The Fix: Access shape via the tensor output, not the layer attribute
-            output_shape = layer.output.shape
+            # 1. Check if layer has an output tensor
+            # (Some layers like Dropout don't change shape, but we check anyway)
+            output = layer.output
             
-            # We look for 4D tensors: (Batch, Height, Width, Filters)
-            if len(output_shape) == 4:
-                # Optional: extra check to ensure it's not an input layer
+            # 2. Check dimensions. We need 4D: (Batch, Height, Width, Filters)
+            if len(output.shape) == 4:
+                # 3. Filter out Input layers
                 if "input" not in layer.name.lower():
                     return layer.name
+                    
         except AttributeError:
-            # Skip layers that don't behave like standard layers
+            # This catches the 'Dense object has no attribute output_shape' error
+            # If a layer is weird, we just skip it and check the next one.
+            continue
+        except Exception:
             continue
             
-    raise ValueError("Could not find a 4D Convolutional Layer.")
+    # If no 4D layer is found (e.g., pure Transformer or fully pooled model)
+    return None
 
 def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
+    if last_conv_layer_name is None:
+        return None
+
     grad_model = tf.keras.models.Model(
         inputs=[model.inputs],
         outputs=[model.get_layer(last_conv_layer_name).output, model.output]
@@ -146,6 +163,11 @@ def load_system():
 try:
     model = load_system()
     CLASSES = ['Bacterial Pneumonia', 'Corona Virus Disease', 'Normal', 'Tuberculosis']
+    
+    # Run the scanner ONCE at startup to see if Heatmaps are possible
+    GRADCAM_LAYER = find_target_layer(model)
+    GRADCAM_AVAILABLE = GRADCAM_LAYER is not None
+
 except Exception as e:
     st.error(f"System Error: {e}")
     st.stop()
@@ -181,8 +203,22 @@ with st.sidebar:
                 st.error("❌ Invalid Link.")
 
     st.markdown("---")
-    show_gradcam = st.toggle("AI Vision (Heatmap)", value=False)
-    alpha = st.slider("Heatmap Intensity", 0.0, 1.0, 0.4)
+    
+    # Only show Grad-CAM controls if the model supports it
+    if GRADCAM_AVAILABLE:
+        st.write("### ⚙️ Visualization")
+        show_gradcam = st.toggle("AI Vision (Heatmap)", value=False)
+        alpha = st.slider("Heatmap Intensity", 0.0, 1.0, 0.4)
+    else:
+        st.markdown("""
+        <div class="unavailable-badge">
+            ⚠️ <b>Heatmap Unavailable</b><br>
+            This hybrid model architecture hides internal layers, so AI Vision is disabled.
+            Diagnostic accuracy is unaffected.
+        </div>
+        """, unsafe_allow_html=True)
+        show_gradcam = False
+        alpha = 0.4
 
 # ==========================================
 # 6. MAIN LOGIC
@@ -201,30 +237,30 @@ if raw_image:
         st.subheader("📷 Patient Scan")
         
         heatmap_generated = False
-        if show_gradcam:
+        if show_gradcam and GRADCAM_AVAILABLE:
             try:
-                # The corrected function call
-                target_layer = find_target_layer(model)
-                heatmap = make_gradcam_heatmap(img_batch, model, target_layer)
+                heatmap = make_gradcam_heatmap(img_batch, model, GRADCAM_LAYER)
                 
-                heatmap = np.uint8(255 * heatmap)
-                jet = cm.get_cmap("jet")
-                jet_colors = jet(np.arange(256))[:, :3]
-                jet_heatmap = jet_colors[heatmap]
-                
-                jet_heatmap_img = tf.keras.preprocessing.image.array_to_img(jet_heatmap)
-                jet_heatmap_img = jet_heatmap_img.resize(processed_image.size)
-                jet_heatmap_img = tf.keras.preprocessing.image.img_to_array(jet_heatmap_img)
-                
-                superimposed_img = jet_heatmap_img * alpha + np.array(processed_image)
-                superimposed_img = tf.keras.preprocessing.image.array_to_img(superimposed_img)
-                
-                st.image(superimposed_img, use_container_width=True, caption=f"AI Attention: {label}")
-                heatmap_generated = True
+                if heatmap is not None:
+                    heatmap = np.uint8(255 * heatmap)
+                    jet = cm.get_cmap("jet")
+                    jet_colors = jet(np.arange(256))[:, :3]
+                    jet_heatmap = jet_colors[heatmap]
+                    
+                    jet_heatmap_img = tf.keras.preprocessing.image.array_to_img(jet_heatmap)
+                    jet_heatmap_img = jet_heatmap_img.resize(processed_image.size)
+                    jet_heatmap_img = tf.keras.preprocessing.image.img_to_array(jet_heatmap_img)
+                    
+                    superimposed_img = jet_heatmap_img * alpha + np.array(processed_image)
+                    superimposed_img = tf.keras.preprocessing.image.array_to_img(superimposed_img)
+                    
+                    st.image(superimposed_img, use_container_width=True, caption=f"AI Attention: {label}")
+                    heatmap_generated = True
             except Exception as e:
-                st.warning(f"⚠️ Heatmap unavailable for this model structure: {e}")
+                # If it fails during generation, fallback silently
+                pass
         
-        if not heatmap_generated and not show_gradcam:
+        if not heatmap_generated:
              st.image(processed_image, use_container_width=True, caption="Analyzed Input")
 
     with col2:
