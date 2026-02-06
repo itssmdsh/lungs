@@ -18,7 +18,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for Medical UI
 st.markdown("""
     <style>
     .stApp { background-color: #f8f9fa; }
@@ -39,17 +38,12 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. INTELLIGENT PREPROCESSING (Auto-Pilot)
+# 2. INTELLIGENT PREPROCESSING
 # ==========================================
 def smart_preprocess_image(image_file):
-    """
-    1. Converts to RGB.
-    2. Detects 'White Background' (Inverted X-Ray) and fixes it.
-    3. Resizes to 256x256 for the model.
-    """
     img = image_file.convert('RGB')
     
-    # Check corners for Inversion (White background)
+    # Auto-Invert Check
     w, h = img.size
     corners = [
         img.getpixel((0, 0)), 
@@ -58,23 +52,41 @@ def smart_preprocess_image(image_file):
         img.getpixel((w-1, h-1))
     ]
     avg_brightness = sum([sum(c)/3 for c in corners]) / 4
-    
-    # Auto-Invert if background is white (>100 brightness)
     if avg_brightness > 100:
         img = ImageOps.invert(img)
     
-    # Prepare for Model
+    # Resize
     img_array = np.array(img)
     img_resized = tf.image.resize(img_array, (256, 256))
     img_batch = np.expand_dims(img_resized, axis=0)
-    
     return img_batch, img
 
 # ==========================================
-# 3. GRAD-CAM (X-RAY VISION) - FIXED
+# 3. ROBUST GRAD-CAM (THE FIX)
 # ==========================================
+def find_target_layer(model):
+    """
+    CRASH-PROOF SCANNER:
+    Iterates through layers and safely checks for 4D output (Conv layers).
+    Uses 'layer.output.shape' instead of 'output_shape' to fix Keras 3 bug.
+    """
+    for layer in reversed(model.layers):
+        try:
+            # The Fix: Access shape via the tensor output, not the layer attribute
+            output_shape = layer.output.shape
+            
+            # We look for 4D tensors: (Batch, Height, Width, Filters)
+            if len(output_shape) == 4:
+                # Optional: extra check to ensure it's not an input layer
+                if "input" not in layer.name.lower():
+                    return layer.name
+        except AttributeError:
+            # Skip layers that don't behave like standard layers
+            continue
+            
+    raise ValueError("Could not find a 4D Convolutional Layer.")
+
 def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
-    # Create a sub-model that maps input -> [conv_output, prediction]
     grad_model = tf.keras.models.Model(
         inputs=[model.inputs],
         outputs=[model.get_layer(last_conv_layer_name).output, model.output]
@@ -86,7 +98,6 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
             pred_index = tf.argmax(preds[0])
         class_channel = preds[:, pred_index]
 
-    # Calculate Gradients
     grads = tape.gradient(class_channel, last_conv_layer_output)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
     
@@ -96,28 +107,12 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
     heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
     return heatmap.numpy()
 
-def find_target_layer(model):
-    """
-    Scans the model to find the last CONVOLUTIONAL layer.
-    Fixes the 'Dense' error by ignoring non-conv layers.
-    """
-    for layer in reversed(model.layers):
-        # Check if it is a Conv2D layer (has filters) or if it has a 4D output shape
-        # We prioritize checking the name for 'conv' or 'block' to be safe
-        if len(layer.output_shape) == 4 and 'conv' in layer.name:
-            return layer.name
-        # Fallback: Just the last 4D layer if no 'conv' in name
-        if len(layer.output_shape) == 4:
-            return layer.name
-            
-    raise ValueError("Could not find a valid target layer for Grad-CAM.")
-
 # ==========================================
 # 4. DATA & MODEL LOADING
 # ==========================================
 DISEASE_INFO = {
     "Bacterial Pneumonia": {
-        "symptoms": ["High fever", "Productive cough (yellow/green)", "Chest pain"],
+        "symptoms": ["High fever", "Productive cough", "Chest pain"],
         "care": ["Antibiotics", "Oxygen therapy", "Hydration"],
         "next_steps": "Blood culture & Sputum test."
     },
@@ -152,7 +147,7 @@ try:
     model = load_system()
     CLASSES = ['Bacterial Pneumonia', 'Corona Virus Disease', 'Normal', 'Tuberculosis']
 except Exception as e:
-    st.error(f"Critical System Error: {e}")
+    st.error(f"System Error: {e}")
     st.stop()
 
 # ==========================================
@@ -174,19 +169,16 @@ with st.sidebar:
         url = st.text_input("Paste Direct Image URL:")
         if url:
             try:
-                # --- FIXED: BROWSER HEADERS FOR ACCESS DENIED ---
                 headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                 }
-                response = requests.get(url, headers=headers, timeout=10)
-                
+                response = requests.get(url, headers=headers, timeout=5)
                 if response.status_code == 200:
                     raw_image = Image.open(BytesIO(response.content))
                 else:
-                    st.error(f"❌ Access Denied (Code {response.status_code}). Try a different link.")
+                    st.error(f"❌ Access Denied (Code {response.status_code}).")
             except Exception as e:
-                st.error("❌ Invalid Link or Connection Error.")
+                st.error("❌ Invalid Link.")
 
     st.markdown("---")
     show_gradcam = st.toggle("AI Vision (Heatmap)", value=False)
@@ -196,10 +188,8 @@ with st.sidebar:
 # 6. MAIN LOGIC
 # ==========================================
 if raw_image:
-    # 1. Auto-Process
     img_batch, processed_image = smart_preprocess_image(raw_image)
     
-    # 2. Predict
     preds = model.predict(img_batch)
     idx = np.argmax(preds[0])
     label = CLASSES[idx]
@@ -210,14 +200,13 @@ if raw_image:
     with col1:
         st.subheader("📷 Patient Scan")
         
-        # --- FIXED: SAFE GRAD-CAM EXECUTION ---
         heatmap_generated = False
         if show_gradcam:
             try:
+                # The corrected function call
                 target_layer = find_target_layer(model)
                 heatmap = make_gradcam_heatmap(img_batch, model, target_layer)
                 
-                # Visual Processing
                 heatmap = np.uint8(255 * heatmap)
                 jet = cm.get_cmap("jet")
                 jet_colors = jet(np.arange(256))[:, :3]
@@ -232,18 +221,14 @@ if raw_image:
                 
                 st.image(superimposed_img, use_container_width=True, caption=f"AI Attention: {label}")
                 heatmap_generated = True
-                
             except Exception as e:
-                st.warning(f"⚠️ Could not generate Heatmap: {e}")
-                # Fallback to normal image if Grad-CAM fails
-                st.image(processed_image, use_container_width=True, caption="Analyzed Input (Grad-CAM Skipped)")
+                st.warning(f"⚠️ Heatmap unavailable for this model structure: {e}")
         
         if not heatmap_generated and not show_gradcam:
              st.image(processed_image, use_container_width=True, caption="Analyzed Input")
 
     with col2:
         st.subheader("🔬 Diagnostic Report")
-        
         color = "#28a745" if label == "Normal" else "#dc3545"
         icon = "✅" if label == "Normal" else "⚠️"
         
@@ -263,22 +248,13 @@ if raw_image:
                 st.progress(float(prob))
         
         info = DISEASE_INFO.get(label, {})
-        t1, t2, t3 = st.tabs(["🤒 Symptoms", "💊 Recommended Care", "📋 Next Steps"])
-        
+        t1, t2, t3 = st.tabs(["🤒 Symptoms", "💊 Care", "📋 Next Steps"])
         with t1:
             for s in info.get("symptoms", []): st.markdown(f"- {s}")
         with t2:
             for c in info.get("care", []): st.markdown(f"- {c}")
         with t3:
             st.info(f"**Action Plan:** {info.get('next_steps')}")
-            if label != "Normal":
-                st.warning("⚠️ Disclaimer: AI results must be verified by a certified Radiologist.")
 
 else:
-    st.markdown("""
-    <br><br>
-    <div style="text-align: center; color: #bdc3c7;">
-        <h1>🩺 Waiting for Scan...</h1>
-        <p>Please upload an X-Ray or paste a direct image link.</p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("<br><br><h3 style='text-align:center; color:#999;'>Waiting for input...</h3>", unsafe_allow_html=True)
