@@ -6,3 +6,4 @@ matplotlib
 seaborn
 gdown
 opencv-python-headless
+requests
