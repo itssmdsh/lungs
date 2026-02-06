@@ -9,7 +9,7 @@ from io import BytesIO
 import os
 
 # ==========================================
-# 1. PAGE CONFIGURATION & STYLING
+# 1. PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(
     page_title="Doctor Assistant Pro",
@@ -18,11 +18,10 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Professional Medical CSS
+# Custom CSS for Medical UI
 st.markdown("""
     <style>
     .stApp { background-color: #f8f9fa; }
-    
     .metric-card {
         background-color: white;
         padding: 20px;
@@ -32,41 +31,25 @@ st.markdown("""
         margin-bottom: 20px;
         border-left: 6px solid #007bff;
     }
-    
-    .pred-title {
-        font-size: 30px;
-        font-weight: 800;
-        margin-bottom: 5px;
-    }
-    
-    .confidence-score {
-        font-size: 18px;
-        color: #555;
-    }
-    
-    /* Custom Tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        background-color: white;
-        border-radius: 4px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
+    .pred-title { font-size: 30px; font-weight: 800; margin-bottom: 5px; }
+    .confidence-score { font-size: 18px; color: #555; }
+    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
+    .stTabs [data-baseweb="tab"] { background-color: white; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     </style>
     """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. INTELLIGENT PREPROCESSING (AUTO-PILOT)
+# 2. INTELLIGENT PREPROCESSING (Auto-Pilot)
 # ==========================================
 def smart_preprocess_image(image_file):
     """
-    Auto-detects inverted X-Rays (white background) and fixes them.
-    Also handles standard resizing and RGB conversion.
+    1. Converts to RGB.
+    2. Detects 'White Background' (Inverted X-Ray) and fixes it.
+    3. Resizes to 256x256 for the model.
     """
     img = image_file.convert('RGB')
     
-    # Check corners for "White Background" (Inverted X-Ray)
+    # Check corners for Inversion (White background)
     w, h = img.size
     corners = [
         img.getpixel((0, 0)), 
@@ -76,12 +59,11 @@ def smart_preprocess_image(image_file):
     ]
     avg_brightness = sum([sum(c)/3 for c in corners]) / 4
     
-    # If corners are bright (>100), it's likely inverted or has a border
+    # Auto-Invert if background is white (>100 brightness)
     if avg_brightness > 100:
         img = ImageOps.invert(img)
-        # st.toast("⚠️ Auto-Corrected: Inverted colors for analysis", icon="🔧")
     
-    # Resize to Model Standard
+    # Prepare for Model
     img_array = np.array(img)
     img_resized = tf.image.resize(img_array, (256, 256))
     img_batch = np.expand_dims(img_resized, axis=0)
@@ -89,9 +71,10 @@ def smart_preprocess_image(image_file):
     return img_batch, img
 
 # ==========================================
-# 3. GRAD-CAM (X-RAY VISION)
+# 3. GRAD-CAM (X-RAY VISION) - FIXED
 # ==========================================
 def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
+    # Create a sub-model that maps input -> [conv_output, prediction]
     grad_model = tf.keras.models.Model(
         inputs=[model.inputs],
         outputs=[model.get_layer(last_conv_layer_name).output, model.output]
@@ -99,9 +82,11 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
     
     with tf.GradientTape() as tape:
         last_conv_layer_output, preds = grad_model(img_array)
-        if pred_index is None: pred_index = tf.argmax(preds[0])
+        if pred_index is None: 
+            pred_index = tf.argmax(preds[0])
         class_channel = preds[:, pred_index]
 
+    # Calculate Gradients
     grads = tape.gradient(class_channel, last_conv_layer_output)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
     
@@ -112,34 +97,44 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
     return heatmap.numpy()
 
 def find_target_layer(model):
-    # Search for the last 4D convolutional layer
+    """
+    Scans the model to find the last CONVOLUTIONAL layer.
+    Fixes the 'Dense' error by ignoring non-conv layers.
+    """
     for layer in reversed(model.layers):
-        if len(layer.output_shape) == 4: return layer.name
-    raise ValueError("Could not find a target layer for Grad-CAM.")
+        # Check if it is a Conv2D layer (has filters) or if it has a 4D output shape
+        # We prioritize checking the name for 'conv' or 'block' to be safe
+        if len(layer.output_shape) == 4 and 'conv' in layer.name:
+            return layer.name
+        # Fallback: Just the last 4D layer if no 'conv' in name
+        if len(layer.output_shape) == 4:
+            return layer.name
+            
+    raise ValueError("Could not find a valid target layer for Grad-CAM.")
 
 # ==========================================
 # 4. DATA & MODEL LOADING
 # ==========================================
 DISEASE_INFO = {
     "Bacterial Pneumonia": {
-        "symptoms": ["High fever & chills", "Productive cough (yellow/green)", "Stabbing chest pain", "Fatigue"],
-        "care": ["Antibiotics (Amoxicillin/Azithromycin)", "Oxygen therapy", "Fluid resuscitation"],
-        "next_steps": "Urgent Pulmonology referral. Blood culture & Sputum test."
+        "symptoms": ["High fever", "Productive cough (yellow/green)", "Chest pain"],
+        "care": ["Antibiotics", "Oxygen therapy", "Hydration"],
+        "next_steps": "Blood culture & Sputum test."
     },
     "Corona Virus Disease": {
-        "symptoms": ["Fever", "Dry cough", "Loss of taste/smell", "Dyspnea (Shortness of breath)"],
-        "care": ["Isolation (14 days)", "Antipyretics", "Proning (lying on stomach)", "SpO2 Monitoring"],
-        "next_steps": "RT-PCR Confirmation. Monitor D-Dimer & CRP levels."
+        "symptoms": ["Fever", "Dry cough", "Loss of taste/smell"],
+        "care": ["Isolation", "Antipyretics", "SpO2 Monitoring"],
+        "next_steps": "RT-PCR Confirmation."
     },
     "Tuberculosis": {
-        "symptoms": ["Chronic cough (3+ weeks)", "Hemoptysis (Blood in sputum)", "Night sweats", "Weight loss"],
-        "care": ["DOTS Regimen (RIPE Therapy)", "Respiratory Isolation", "High-protein diet"],
-        "next_steps": "Sputum AFB Smear & GeneXpert MTB/RIF test."
+        "symptoms": ["Chronic cough", "Blood in sputum", "Weight loss"],
+        "care": ["DOTS Regimen", "Respiratory Isolation"],
+        "next_steps": "Sputum AFB Smear & GeneXpert test."
     },
     "Normal": {
-        "symptoms": ["No abnormal opacities", "Clear costophrenic angles", "Normal cardiac silhouette"],
-        "care": ["Maintain healthy lifestyle", "Annual check-up", "No treatment needed"],
-        "next_steps": "Routine follow-up as per age protocols."
+        "symptoms": ["No abnormalities"],
+        "care": ["Maintain healthy lifestyle"],
+        "next_steps": "Routine follow-up."
     }
 }
 
@@ -147,8 +142,8 @@ DISEASE_INFO = {
 def load_system():
     model_path = 'Final_Hybrid_Model.keras'
     if not os.path.exists(model_path):
-        with st.spinner("📥 Downloading AI Brain from Cloud..."):
-            file_id = '1OBkEkxsTK_V82RULwKgFQ10bvhV-xwnA' # Your Drive ID
+        with st.spinner("📥 Downloading AI Brain..."):
+            file_id = '1OBkEkxsTK_V82RULwKgFQ10bvhV-xwnA'
             url = f'https://drive.google.com/uc?id={file_id}'
             gdown.download(url, model_path, quiet=False)
     return tf.keras.models.load_model(model_path)
@@ -157,7 +152,7 @@ try:
     model = load_system()
     CLASSES = ['Bacterial Pneumonia', 'Corona Virus Disease', 'Normal', 'Tuberculosis']
 except Exception as e:
-    st.error(f"Critical Error: {e}")
+    st.error(f"Critical System Error: {e}")
     st.stop()
 
 # ==========================================
@@ -166,11 +161,9 @@ except Exception as e:
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3774/3774299.png", width=70)
     st.title("Doctor Assistant")
-    st.caption("v5.0 | Hybrid AI Diagnostic Tool")
-    
     st.markdown("---")
-    input_method = st.radio("Select Input Source:", ("📂 Upload File", "🌐 Image Link"))
     
+    input_method = st.radio("Select Input:", ("📂 Upload File", "🌐 Image Link"))
     raw_image = None
     
     if input_method == "📂 Upload File":
@@ -181,53 +174,55 @@ with st.sidebar:
         url = st.text_input("Paste Direct Image URL:")
         if url:
             try:
-                # DISGUISE AS BROWSER TO FIX "INVALID LINK" ERRORS
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'}
-                response = requests.get(url, headers=headers, timeout=5)
+                # --- FIXED: BROWSER HEADERS FOR ACCESS DENIED ---
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+                }
+                response = requests.get(url, headers=headers, timeout=10)
+                
                 if response.status_code == 200:
                     raw_image = Image.open(BytesIO(response.content))
                 else:
-                    st.error(f"❌ Access Denied (Status {response.status_code})")
+                    st.error(f"❌ Access Denied (Code {response.status_code}). Try a different link.")
             except Exception as e:
-                st.error("❌ Invalid Link. Ensure it ends in .jpg or .png")
+                st.error("❌ Invalid Link or Connection Error.")
 
     st.markdown("---")
-    st.write("### ⚙️ Analysis Tools")
     show_gradcam = st.toggle("AI Vision (Heatmap)", value=False)
     alpha = st.slider("Heatmap Intensity", 0.0, 1.0, 0.4)
 
 # ==========================================
-# 6. MAIN DASHBOARD LOGIC
+# 6. MAIN LOGIC
 # ==========================================
 if raw_image:
-    # --- AUTO-PROCESSING ---
+    # 1. Auto-Process
     img_batch, processed_image = smart_preprocess_image(raw_image)
     
-    # --- INFERENCE ---
+    # 2. Predict
     preds = model.predict(img_batch)
     idx = np.argmax(preds[0])
     label = CLASSES[idx]
     conf = preds[0][idx] * 100
     
-    # --- LAYOUT ---
     col1, col2 = st.columns([1, 1.5], gap="large")
     
     with col1:
         st.subheader("📷 Patient Scan")
         
+        # --- FIXED: SAFE GRAD-CAM EXECUTION ---
+        heatmap_generated = False
         if show_gradcam:
             try:
-                # Generate Heatmap
                 target_layer = find_target_layer(model)
                 heatmap = make_gradcam_heatmap(img_batch, model, target_layer)
                 
-                # Colorize
+                # Visual Processing
                 heatmap = np.uint8(255 * heatmap)
                 jet = cm.get_cmap("jet")
                 jet_colors = jet(np.arange(256))[:, :3]
                 jet_heatmap = jet_colors[heatmap]
                 
-                # Overlay
                 jet_heatmap_img = tf.keras.preprocessing.image.array_to_img(jet_heatmap)
                 jet_heatmap_img = jet_heatmap_img.resize(processed_image.size)
                 jet_heatmap_img = tf.keras.preprocessing.image.img_to_array(jet_heatmap_img)
@@ -236,38 +231,37 @@ if raw_image:
                 superimposed_img = tf.keras.preprocessing.image.array_to_img(superimposed_img)
                 
                 st.image(superimposed_img, use_container_width=True, caption=f"AI Attention: {label}")
+                heatmap_generated = True
+                
             except Exception as e:
-                st.error(f"Heatmap Error: {e}")
-                st.image(processed_image, use_container_width=True)
-        else:
-            st.image(processed_image, use_container_width=True, caption="Auto-Enhanced Input")
+                st.warning(f"⚠️ Could not generate Heatmap: {e}")
+                # Fallback to normal image if Grad-CAM fails
+                st.image(processed_image, use_container_width=True, caption="Analyzed Input (Grad-CAM Skipped)")
+        
+        if not heatmap_generated and not show_gradcam:
+             st.image(processed_image, use_container_width=True, caption="Analyzed Input")
 
     with col2:
         st.subheader("🔬 Diagnostic Report")
         
-        # Dynamic Colors
         color = "#28a745" if label == "Normal" else "#dc3545"
         icon = "✅" if label == "Normal" else "⚠️"
         
-        # 1. Main Result Card
         st.markdown(f"""
         <div class="metric-card" style="border-left: 8px solid {color};">
             <div class="pred-title" style="color: {color};">{icon} {label.upper()}</div>
             <div class="confidence-score">Certainty: <b>{conf:.2f}%</b></div>
-            <p style="font-size:14px; margin-top:5px; color:#888;">Analysis by Titan Hybrid Model</p>
+            <p style="font-size:14px; margin-top:5px; color:#888;">Hybrid Neural Analysis</p>
         </div>
         """, unsafe_allow_html=True)
         
-        # 2. Probability Breakdown
         with st.expander("📊 Full Probability Breakdown", expanded=True):
              for i, class_name in enumerate(CLASSES):
                 prob = preds[0][i]
-                # Highlight the predicted class
                 txt_color = "red" if prob > 0.5 and class_name != "Normal" else "black"
                 st.write(f"<span style='color:{txt_color}'>**{class_name}**: {prob*100:.2f}%</span>", unsafe_allow_html=True)
                 st.progress(float(prob))
         
-        # 3. Medical Insights (Tabs)
         info = DISEASE_INFO.get(label, {})
         t1, t2, t3 = st.tabs(["🤒 Symptoms", "💊 Recommended Care", "📋 Next Steps"])
         
@@ -281,11 +275,10 @@ if raw_image:
                 st.warning("⚠️ Disclaimer: AI results must be verified by a certified Radiologist.")
 
 else:
-    # Empty State Hero
     st.markdown("""
     <br><br>
     <div style="text-align: center; color: #bdc3c7;">
         <h1>🩺 Waiting for Scan...</h1>
-        <p>Please upload an X-Ray or paste a link to begin analysis.</p>
+        <p>Please upload an X-Ray or paste a direct image link.</p>
     </div>
     """, unsafe_allow_html=True)
