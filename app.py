@@ -1,304 +1,162 @@
 import streamlit as st
 import tensorflow as tf
 import numpy as np
-import cv2
 from PIL import Image
-import time
-import os
 import gdown
+import os
+import time
 
 # ==========================================
-# 1. PAGE CONFIGURATION & THEME
+# 1. PAGE CONFIGURATION & STYLING
 # ==========================================
 st.set_page_config(
-    page_title="LungScan AI | Medical Diagnostic System",
-    page_icon="🫁",
-    layout="wide",
+    page_title="Doctor Assistant",
+    page_icon="🩺",
+    layout="wide",  # Uses full screen width
     initial_sidebar_state="expanded"
 )
 
-# PROFESSIONAL MEDICAL THEME CSS
+# Custom CSS for "Medical Dashboard" Look
 st.markdown("""
     <style>
-    .stApp { background: linear-gradient(to bottom right, #f8f9fa, #e3f2fd); }
-    h1 { color: #1565C0; font-family: 'Helvetica Neue', sans-serif; font-weight: 700; text-align: center; }
-    h3 { color: #455A64; text-align: center; font-weight: 300; }
-    .stButton>button {
-        width: 100%; background-color: #1976D2; color: white; font-weight: bold;
-        border-radius: 8px; height: 55px; border: none; font-size: 20px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: 0.3s;
+    /* Main Background */
+    .stApp {
+        background-color: #f8f9fa;
     }
-    .stButton>button:hover { background-color: #1565C0; transform: translateY(-2px); }
-    .report-view {
-        background-color: white; padding: 30px; border-radius: 15px;
-        box-shadow: 0 10px 25px rgba(0,0,0,0.08); text-align: center;
-        margin-bottom: 20px; border: 1px solid #e0e0e0;
+    
+    /* Card Styling */
+    .metric-card {
+        background-color: white;
+        padding: 20px;
+        border-radius: 15px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        margin-bottom: 15px;
+        text-align: center;
     }
-    .info-box {
-        background-color: #E3F2FD; padding: 15px; border-radius: 10px;
-        border-left: 5px solid #1976D2; margin-bottom: 15px;
+    
+    /* Header Styling */
+    h1, h2, h3 {
+        color: #2c3e50;
+        font-family: 'Segoe UI', sans-serif;
     }
-    .symptom-box {
-        background-color: #fff3e0; border-left: 5px solid #ff9800;
-        padding: 15px; border-radius: 5px; margin-top: 10px; text-align: left;
+    
+    /* Prediction Label Styling */
+    .pred-label {
+        font-size: 28px;
+        font-weight: bold;
+        margin: 10px 0;
     }
+    
+    /* Success/Critical Colors */
+    .normal { color: #27ae60; }
+    .disease { color: #e74c3c; }
     </style>
-""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. KNOWLEDGE BASE (Symptoms)
-# ==========================================
-CLASSES = ['Bacterial Pneumonia', 'Corona Virus Disease', 'Normal', 'Tuberculosis']
-
-SYMPTOMS = {
-    'Bacterial Pneumonia': [
-        "High fever and chills",
-        "Cough with thick yellow or green phlegm",
-        "Sharp chest pain when breathing deeply",
-        "Shortness of breath during mild activity"
-    ],
-    'Corona Virus Disease': [
-        "Fever or chills",
-        "New loss of taste or smell",
-        "Dry, persistent cough",
-        "Difficulty breathing (dyspnea)"
-    ],
-    'Tuberculosis': [
-        "Persistent cough lasting 3+ weeks",
-        "Coughing up blood (hemoptysis)",
-        "Unintentional weight loss",
-        "Night sweats and fever"
-    ],
-    'Normal': [
-        "No radiological abnormalities detected.",
-        "Lungs appear clear and healthy.",
-        "Maintain regular check-ups."
-    ]
-}
-
-# ==========================================
-# 3. MODEL LOADING (Google Drive Bypass)
+# 2. MODEL LOADER (Auto-Download)
 # ==========================================
 @st.cache_resource
-def load_models():
-    # ⚠️ GOOGLE DRIVE IDs
-    id_dense = '1aWtU79Xk1Vmrg8BsBL9VgwwZxk6eY4oz' 
-    id_res   = '176xn7ZUy1iRllmtPxdcpeWplQ2nJ40sW'   
+def load_system():
+    model_path = 'Final_Hybrid_Model.keras'
     
-    if not os.path.exists("Final_DenseNet.keras"):
-        with st.spinner("📥 System Initializing: Downloading DenseNet Core..."):
-            gdown.download(id=id_dense, output="Final_DenseNet.keras", quiet=False)
-
-    if not os.path.exists("Final_ResNet.keras"):
-        with st.spinner("📥 System Initializing: Downloading ResNet Core..."):
-            gdown.download(id=id_res, output="Final_ResNet.keras", quiet=False)
-
-    m1 = tf.keras.models.load_model("Final_DenseNet.keras")
-    m2 = tf.keras.models.load_model("Final_ResNet.keras")
-    return m1, m2
-
-with st.spinner("🏥 Booting Diagnostic Engine..."):
-    try:
-        model_dense, model_res = load_models()
-    except Exception as e:
-        st.error(f"❌ Error loading models: {e}")
-        st.stop()
-
-# ==========================================
-# 4. CORE AI ENGINES
-# ==========================================
-def generate_120_views(image_pil):
-    img = np.array(image_pil.convert('RGB'))
-    img = cv2.resize(img, (224, 224))
-    views = []
-    h, w = img.shape[:2]
-    center = (w//2, h//2)
-    for angle in range(-14, 15, 2): 
-        for scale in [1.0, 1.05, 1.10, 1.15]: 
-            M = cv2.getRotationMatrix2D(center, angle, scale)
-            aug = cv2.warpAffine(img, M, (w, h))
-            views.append(aug)
-            views.append(cv2.flip(aug, 1)) 
-    return np.array(views)
-
-def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
-    grad_model = tf.keras.models.Model(
-        [model.inputs], [model.get_layer(last_conv_layer_name).output, model.output]
-    )
-    with tf.GradientTape() as tape:
-        last_conv_layer_output, preds = grad_model(img_array)
-        if pred_index is None:
-            pred_index = tf.argmax(preds[0])
-        
-        # ---------------------------------------------------------
-        # 🛠️ ROBUST FIX: Use .item() to extract scalar safely
-        # ---------------------------------------------------------
-        if isinstance(pred_index, tf.Tensor):
-            pred_index = pred_index.numpy()
-        
-        if hasattr(pred_index, "item"):
-            pred_index = pred_index.item()
+    if not os.path.exists(model_path):
+        with st.spinner("📥 Downloading AI Brain from Secure Cloud..."):
+            file_id = '1OBkEkxsTK_V82RULwKgFQ10bvhV-xwnA'
+            url = f'https://drive.google.com/uc?id={file_id}'
+            gdown.download(url, model_path, quiet=False)
             
-        pred_index = int(pred_index)
-        # ---------------------------------------------------------
+    model = tf.keras.models.load_model(model_path)
+    return model
 
-        class_channel = preds[:, pred_index]
-
-    grads = tape.gradient(class_channel, last_conv_layer_output)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-    last_conv_layer_output = last_conv_layer_output[0]
-    heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-    heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
-    return heatmap.numpy()
-
-def generate_gradcam_overlay(img_pil, model):
-    img_array = np.array(img_pil.resize((224, 224))).astype('float32') / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
-    
-    # 1. Find the last Conv layer
-    last_conv_layer = None
-    for layer in reversed(model.layers):
-        if isinstance(layer, tf.keras.layers.Conv2D):
-            last_conv_layer = layer.name
-            break
-
-    # 2. Generate Heatmap (0 to 1)
-    heatmap = make_gradcam_heatmap(img_array, model, last_conv_layer)
-    heatmap = cv2.resize(heatmap, (224, 224))
-    
-    # 3. Convert to Jet Color Scheme (Red=Hot, Blue=Cold)
-    heatmap_uint8 = np.uint8(255 * heatmap)
-    heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
-    
-    # ---------------------------------------------------------
-    # 🛠️ VISUAL FIX: Transparency Mask
-    # Remove the "Blue Screen" by making low values transparent
-    # ---------------------------------------------------------
-    alpha = np.float32(heatmap) 
-    alpha = np.expand_dims(alpha, axis=-1) # Shape (224, 224, 1)
-    
-    # Blend: Only apply heatmap where alpha is high
-    # Formula: Original * (1 - alpha) + Heatmap * alpha
-    original_img = np.array(img_pil)
-    
-    # Mix 50% heatmap, 50% original
-    superimposed_img = original_img * (1 - alpha * 0.6) + heatmap_colored * (alpha * 0.6)
-    superimposed_img = np.clip(superimposed_img, 0, 255).astype(np.uint8)
-    
-    return superimposed_img
-
-def run_prediction(image, deep_scan_mode):
-    start_time = time.time()
-    
-    if deep_scan_mode:
-        status_text = st.empty()
-        bar = st.progress(0)
-        status_text.info("🧬 Performing Deep Scan (120 Angles)...")
-        
-        batch = generate_120_views(image).astype('float32') / 255.0
-        chunk_size = 32
-        preds = []
-        
-        for i in range(0, len(batch), chunk_size):
-            chunk = batch[i:i+chunk_size]
-            p1 = model_dense.predict(chunk, verbose=0)
-            p2 = model_res.predict(chunk, verbose=0)
-            preds.append((p1 + p2) / 2.0)
-            bar.progress(min((i + chunk_size) / 120, 1.0))
-            
-        final_probs = np.mean(np.vstack(preds), axis=0)
-        status_text.empty(); bar.empty()
-    else:
-        img = np.array(image.resize((224, 224))).astype('float32') / 255.0
-        img = np.expand_dims(img, axis=0)
-        p1 = model_dense.predict(img, verbose=0)[0]
-        p2 = model_res.predict(img, verbose=0)[0]
-        final_probs = (p1 * 0.5) + (p2 * 0.5)
-
-    return final_probs, time.time() - start_time
+try:
+    model = load_system()
+    CLASSES = ['Bacterial Pneumonia', 'Corona Virus Disease', 'Normal', 'Tuberculosis']
+except Exception as e:
+    st.error(f"System Error: {e}")
+    st.stop()
 
 # ==========================================
-# 5. UI LAYOUT
+# 3. SIDEBAR (Control Panel)
 # ==========================================
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/3063/3063176.png", width=100)
-    st.title("Settings")
+    st.image("https://cdn-icons-png.flaticon.com/512/3774/3774299.png", width=80)
+    st.title("Doctor Assistant")
+    st.caption("AI-Powered Radiologist Aid")
+    st.markdown("---")
+    
+    uploaded_file = st.file_uploader("📂 Upload Patient X-Ray", type=["jpg", "png", "jpeg"])
+    
+    st.markdown("---")
+    st.info("ℹ️ **Privacy Note:** Uploaded scans are processed locally in RAM and not saved.")
+
+# ==========================================
+# 4. MAIN DASHBOARD
+# ==========================================
+st.markdown("### 🏥 Diagnostic Dashboard")
+
+if uploaded_file is None:
+    # Hero Section (Empty State)
     st.markdown("""
-    <div class="info-box">
-        <b>Supported Detections:</b><br>
-        • Bacterial Pneumonia<br>• COVID-19<br>• Tuberculosis (TB)<br>• Normal (Healthy)
+    <div style="text-align: center; padding: 50px; color: #95a5a6;">
+        <h2>Ready for Analysis</h2>
+        <p>Please upload a Chest X-Ray (CXR) from the sidebar to begin.</p>
     </div>
     """, unsafe_allow_html=True)
+
+else:
+    # Layout: Left = Image, Right = Results
+    col1, col2 = st.columns([1, 1.5], gap="large")
     
-    deep_mode = st.toggle("🧬 Deep Scan (High Accuracy)", value=False)
-    explain_ai = st.toggle("🔥 Explain AI (Heatmap)", value=True)
-    st.markdown("---")
-    st.caption("v1.1.2 | ResNet50V2 + DenseNet121")
-
-st.title("🫁 LungScan AI")
-st.markdown("### Advanced Chest X-Ray Diagnostic System")
-
-col1, col2 = st.columns([1, 1.5])
-
-with col1:
-    st.markdown("#### 1. Upload Patient Scan")
-    uploaded_file = st.file_uploader("Upload X-Ray (JPG/PNG)", type=["jpg", "png", "jpeg"])
-    
-    if uploaded_file:
+    with col1:
+        st.markdown("#### 📷 Patient Scan")
         image = Image.open(uploaded_file).convert('RGB')
-        st.image(image, caption="Uploaded X-Ray", use_container_width=True)
-
-with col2:
-    if uploaded_file:
-        st.markdown("#### 2. Clinical Analysis")
-        btn_label = "🔍 Run Deep Scan Analysis" if deep_mode else "⚡ Run Fast Analysis"
+        # Display with rounded corners
+        st.image(image, use_container_width=True)
         
-        if st.button(btn_label):
-            with st.spinner("🤖 Analyzing pulmonary patterns..."):
-                probs, time_taken = run_prediction(image, deep_mode)
-                
-                idx = np.argmax(probs)
-                label = CLASSES[idx]
-                conf = probs[idx] * 100
-                
-                if label == "Normal":
-                    color = "#2e7d32"
-                    status = "✅ Healthy Lung Tissue Detected"
-                else:
-                    color = "#c62828"
-                    status = f"⚠️ Abnormality Detected: {label.replace('_', ' ')}"
-                
-                st.markdown(f"""
-                <div class="report-view" style="border-top: 6px solid {color};">
-                    <h3 style="color: {color}; margin:0; font-weight:bold;">{status}</h3>
-                    <h1 style="font-size: 45px; margin: 10px 0; color: #333;">{conf:.1f}%</h1>
-                    <p style="color:gray; font-size:14px;">Confidence Score</p>
-                    <hr>
-                    <p style="font-size:12px;">⏱️ Time: {time_taken:.3f}s | 🧠 Scans: {120 if deep_mode else 1}</p>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                st.markdown(f"##### 🩺 Typical Symptoms ({label.replace('_', ' ')})")
-                symptoms_list = SYMPTOMS.get(label, [])
-                symptoms_html = "".join([f"<li>{s}</li>" for s in symptoms_list])
-                st.markdown(f"<div class='symptom-box'><ul>{symptoms_html}</ul></div>", unsafe_allow_html=True)
+    with col2:
+        st.markdown("#### 🔬 AI Analysis Report")
+        
+        # Loading Animation
+        with st.spinner("Running Hybrid Model Analysis..."):
+            time.sleep(1) # UX smoothing
+            
+            # Preprocessing
+            img_array = np.array(image)
+            img_resized = tf.image.resize(img_array, (256, 256))
+            img_batch = np.expand_dims(img_resized, axis=0)
+            
+            # Prediction
+            preds = model.predict(img_batch)
+            idx = np.argmax(preds[0])
+            label = CLASSES[idx]
+            conf = preds[0][idx] * 100
+            
+            # Dynamic Styling
+            status_class = "normal" if label == "Normal" else "disease"
+            icon = "✅" if label == "Normal" else "⚠️"
+            
+            # --- MAIN RESULT CARD ---
+            st.markdown(f"""
+            <div class="metric-card">
+                <h3 style="margin:0; color:#7f8c8d;">Primary Diagnosis</h3>
+                <div class="pred-label {status_class}">{icon} {label}</div>
+                <p style="font-size: 18px;">Confidence: <b>{conf:.2f}%</b></p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # --- DETAILED PROBABILITIES ---
+            st.markdown("##### Detailed Confidence Levels")
+            for i, class_name in enumerate(CLASSES):
+                prob = preds[0][i]
+                st.write(f"**{class_name}**")
+                st.progress(float(prob)) # Requires float between 0.0 and 1.0
 
-                if explain_ai and label != "Normal":
-                    st.markdown("##### 🔥 AI Attention Map (Lesion Localization)")
-                    heatmap = generate_gradcam_overlay(image, model_res)
-                    st.image(heatmap, caption="Red Areas Indicate Disease Pattern", use_container_width=True)
-                
-                st.markdown("##### Detailed Probability Distribution")
-                st.bar_chart(dict(zip(CLASSES, probs)), color=color)
-
-    else:
-        st.info("👈 Please upload a Chest X-Ray from the left panel to begin analysis.")
-        st.markdown("""
-        **System Capabilities:**
-        * **97%+ Accuracy** using Ensemble Learning
-        * **120-View Deep Scan** for edge cases
-        * **Grad-CAM** visualization for interpretability
-        * **Automated Symptom Checker**
-        """)
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; font-size: 12px; color: #95a5a6;">
+    <b>Doctor Assistant AI v2.0</b> | Powered by Titan Hybrid Architecture<br>
+    Disclaimer: This tool is for investigational use only and does not replace professional medical advice.
+</div>
+""", unsafe_allow_html=True)
